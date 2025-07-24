@@ -1,16 +1,37 @@
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, APIRouter,WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func,or_,and_
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session,joinedload
 from . import models, schemas, utils, auth, database
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import timedelta
 from typing import List
 from .websocket_manager import manager
-import asyncio
+
 
 models.Base.metadata.create_all(bind=database.engine)
 
 app = FastAPI()
+
+# --- CORS Configuration ---
+# Define the origins that are allowed to make requests to your API.
+# In development, 'http://localhost:3000' is where your Next.js app is running.
+# In production, this would be your deployed frontend URL (e.g., 'https://your-frontend.com').
+origins = [
+    "http://localhost:3000",  # Your Next.js frontend
+    "http://localhost",       # For general localhost access (e.g., if you browse directly)
+    # Add other origins if your frontend is deployed elsewhere, e.g.:
+    # "https://www.your-production-frontend.com",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,       # List of allowed origins
+    allow_credentials=True,      # Allow cookies to be included in cross-origin requests
+    allow_methods=["*"],         # Allow all HTTP methods (GET, POST, PUT, DELETE, OPTIONS, etc.)
+    allow_headers=["*"],         # Allow all headers in the request
+)
+# --- End CORS Configuration ---
 
 @app.post("/signup", response_model=schemas.UserOut)
 def signup(user: schemas.UserCreate, db: Session = Depends(auth.get_db)):
@@ -71,6 +92,46 @@ async def send_message(message: schemas.MessageCreate, db: Session = Depends(aut
 
     return new_message
 
+@app.get("/grouped-conversations", response_model=List[schemas.Conversation])
+def get_grouped_conversations(db: Session = Depends(auth.get_db), current_user: models.User = Depends(auth.get_current_user)):
+    # Get distinct conversation partners with the latest message
+    subquery = (
+        db.query(
+            func.greatest(models.Message.sender_id, models.Message.receiver_id).label("user1"),
+            func.least(models.Message.sender_id, models.Message.receiver_id).label("user2"),
+            func.max(models.Message.timestamp).label("last_message_time")
+        )
+        .filter(or_(models.Message.sender_id == current_user.id, models.Message.receiver_id == current_user.id))
+        .group_by("user1", "user2")
+        .subquery()
+    )
+
+    results = (
+        db.query(models.Message)
+        .join(subquery, and_(
+            func.greatest(models.Message.sender_id, models.Message.receiver_id) == subquery.c.user1,
+            func.least(models.Message.sender_id, models.Message.receiver_id) == subquery.c.user2,
+            models.Message.timestamp == subquery.c.last_message_time
+        ))
+        .order_by(models.Message.timestamp.desc())
+        .all()
+    )
+
+    results = (
+        db.query(models.Message)
+        .options(joinedload(models.Message.sender), joinedload(models.Message.receiver))
+        .join(subquery, and_(
+            func.greatest(models.Message.sender_id, models.Message.receiver_id) == subquery.c.user1,
+            func.least(models.Message.sender_id, models.Message.receiver_id) == subquery.c.user2,
+            models.Message.timestamp == subquery.c.last_message_time
+        ))
+        # .group_by(models.Message.id)
+        .order_by(models.Message.timestamp.desc())
+        .all()
+    )
+
+    return results
+
 @app.get("/conversations", response_model=List[schemas.Conversation])
 def get_conversations(db: Session = Depends(auth.get_db), current_user: models.User = Depends(auth.get_current_user)):
     # Get distinct conversation partners with the latest message
@@ -96,7 +157,28 @@ def get_conversations(db: Session = Depends(auth.get_db), current_user: models.U
         .all()
     )
 
+    results = (
+        db.query(models.Message)
+        .options(joinedload(models.Message.sender), joinedload(models.Message.receiver))
+        .join(subquery, and_(
+            func.greatest(models.Message.sender_id, models.Message.receiver_id) == subquery.c.user1,
+            func.least(models.Message.sender_id, models.Message.receiver_id) == subquery.c.user2,
+            models.Message.timestamp == subquery.c.last_message_time
+        ))
+        .order_by(models.Message.timestamp.desc())
+        .all()
+    )
+
     return results
+
+
+@app.get("/users", response_model=list[schemas.UserOut])
+def get_all_users(
+    db: Session = Depends(auth.get_db),
+    current_user: models.User = Depends(auth.get_current_user)
+):
+    users = db.query(models.User).filter(models.User.id != current_user.id).all()
+    return users
 
 
 @app.post("/mark-as-read", response_model=schemas.MessageRead)

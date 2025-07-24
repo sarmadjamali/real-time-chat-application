@@ -54,6 +54,8 @@ class Conversation(BaseModel):
     id: int
     sender_id: int
     receiver_id: int
+    sender: UserOut
+    receiver: UserOut
     content: str
     timestamp: datetime
     is_read:bool
@@ -70,6 +72,17 @@ class ActiveUserCreate(ActiveUserBase):
 
 class ActiveUserResponse(ActiveUserBase):
     connected_at: datetime
+
+    class Config:
+        orm_mode = True
+
+
+# This schema will be returned in response
+class UserOut(BaseModel):
+    id: int
+    first_name: str
+    last_name: str
+    email: str
 
     class Config:
         orm_mode = True
